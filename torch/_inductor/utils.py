@@ -104,7 +104,29 @@ if TYPE_CHECKING:
     from .scheduler import BaseSchedulerNode, SchedulerBuffer
 
 
-GPU_TYPES = ["cuda", "mps", "xpu", "mtia"]
+_GPU_TYPES_CACHE: list[str] | None = None
+
+
+def _get_gpu_types() -> list[str]:
+    global _GPU_TYPES_CACHE
+    if _GPU_TYPES_CACHE is None:
+        from torch._dynamo.device_interface import get_registered_device_interfaces, BackendFeature
+
+        _GPU_TYPES_CACHE = [
+            name
+            for name, iface in get_registered_device_interfaces()
+            if ":" not in name
+            and BackendFeature.GPU in iface.backend_features(None)
+        ]
+    return _GPU_TYPES_CACHE
+
+
+def __getattr__(name: str) -> list[str]:
+    if name == "GPU_TYPES":
+        return _get_gpu_types()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 T = TypeVar("T")
 
 
@@ -112,7 +134,7 @@ T = TypeVar("T")
 # when get_gpu_type is imported from dynamo
 @functools.cache
 def get_gpu_type() -> str:
-    avail_gpus = [x for x in GPU_TYPES if getattr(torch, x).is_available()]
+    avail_gpus = [x for x in _get_gpu_types() if getattr(torch, x).is_available()]
     if not len(avail_gpus) <= 1:
         raise AssertionError(
             f"Expected at most 1 available GPU type, got {len(avail_gpus)}: {avail_gpus}"
@@ -1914,7 +1936,8 @@ def use_triton_template(
     enable_float8: bool = False,
     check_max_autotune: bool = True,
 ) -> bool:
-    from .codegen.common import BackendFeature, has_backend_feature
+    from torch._dynamo.device_interface import BackendFeature
+    from .codegen.common import has_backend_feature
 
     layout_dtypes = [torch.float16, torch.bfloat16, torch.float32]
     if enable_int32:
