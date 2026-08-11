@@ -421,7 +421,40 @@ struct ExpandableSegment {
     // we allocate enough address space for 1 1/8 the total memory on the GPU.
     // This allows for some cases where we have to unmap pages earlier in the
     // segment to put them at the end.
-    max_handles_ = numSegments(prop.totalGlobalMem + prop.totalGlobalMem / 8);
+    const size_t full_reserve = prop.totalGlobalMem + prop.totalGlobalMem / 8;
+    size_t reserve = full_reserve;
+    // Serving streams may be tagged with a reserve class to downsize their VA
+    // reservation (see PYTORCH_CUDA_ALLOC_CONF expandable_segments_reserve*).
+    // Untagged streams and IPC-imported segments (no stream) keep the full
+    // reserve, so this path is a byte-for-byte no-op unless reserve config is
+    // set. A single allocation cannot span segments, so the reserve is raised
+    // to the floor, and the result is capped at the historical full reserve
+    // (see clamp_reserve_bytes).
+    if (stream.has_value()) {
+      const std::string reserve_class =
+          getExpandableSegmentReserveClassForStream(*stream);
+      // Single locked snapshot so a concurrent setAllocatorSettings() re-parse
+      // cannot compose an inconsistent (reserve, class_known, floor) view.
+      const auto decision =
+          CUDAAllocatorConfig::expandable_segments_reserve_decision(
+              reserve_class, prop.totalGlobalMem);
+      if (decision.reserve_bytes.has_value() && !reserve_class.empty() &&
+          !decision.class_known) {
+        static std::mutex warn_mutex;
+        static ska::flat_hash_set<std::string> warned;
+        std::lock_guard<std::mutex> lock(warn_mutex);
+        if (warned.insert(reserve_class).second) {
+          TORCH_WARN(
+              "expandable_segments reserve class '",
+              reserve_class,
+              "' has no configured reserve in "
+              "expandable_segments_reserve_by_class; using the default reserve.");
+        }
+      }
+      reserve =
+          CUDAAllocatorConfig::clamp_reserve_bytes(decision, full_reserve);
+    }
+    max_handles_ = numSegments(reserve);
 #ifdef USE_ROCM
     C10_CUDA_CHECK(hipMemAddressReserve(
         &ptr_, segment_size_ * max_handles_, 0ULL, 0, 0ULL));
@@ -3488,6 +3521,31 @@ class DeviceCachingAllocator {
       // map_block will map some of unmapped and merge with free
       auto remaining = size - candidate->size;
       auto new_candidate = candidate->next;
+      // A single allocation cannot span expandable segments. If the stream's
+      // (possibly downsized) per-segment reserve is smaller than this single
+      // allocation, no segment can ever satisfy it: the segment's address space
+      // is exhausted (next == null) before we reach `size`. Fail with an
+      // actionable message instead of dereferencing a null next block.
+      if (new_candidate == nullptr) {
+        const std::string reserve_class =
+            getExpandableSegmentReserveClassForStream(stream);
+        TORCH_CHECK_WITH(
+            OutOfMemoryError,
+            false,
+            "CUDA out of memory: a single allocation of ",
+            format_size(size),
+            " exceeds the per-stream expandable-segment reserve of ",
+            format_size(candidate->expandable_segment_->size()),
+            " (stream reserve class '",
+            reserve_class,
+            "'). A single allocation cannot span expandable segments, so it "
+            "cannot be satisfied. If the reserve was downsized via "
+            "PYTORCH_CUDA_ALLOC_CONF expandable_segments_reserve or "
+            "expandable_segments_reserve_by_class, raise the reserve for this "
+            "class (or unset it) so a segment is at least ",
+            format_size(size),
+            ".");
+      }
       if (!map_block(
               new_candidate, std::min(remaining, candidate->next->size), ctx)) {
         return nullptr;
@@ -5397,5 +5455,43 @@ struct BackendStaticInitializer {
 
 std::atomic<CUDAAllocator*> allocator;
 static BackendStaticInitializer backend_static_initializer;
+
+namespace {
+std::mutex& expandableSegmentReserveClassMutex() {
+  static std::mutex m;
+  return m;
+}
+ska::flat_hash_map<cudaStream_t, std::string>&
+expandableSegmentReserveClassMap() {
+  static ska::flat_hash_map<cudaStream_t, std::string> m;
+  return m;
+}
+} // namespace
+
+void setExpandableSegmentReserveClassForStream(
+    cudaStream_t stream,
+    const std::string& reserve_class) {
+  std::lock_guard<std::mutex> lock(expandableSegmentReserveClassMutex());
+  if (reserve_class.empty()) {
+    expandableSegmentReserveClassMap().erase(stream);
+  } else {
+    expandableSegmentReserveClassMap()[stream] = reserve_class;
+  }
+}
+
+std::string getExpandableSegmentReserveClassForStream(cudaStream_t stream) {
+  std::lock_guard<std::mutex> lock(expandableSegmentReserveClassMutex());
+  auto& map = expandableSegmentReserveClassMap();
+  auto it = map.find(stream);
+  return it != map.end() ? it->second : std::string{};
+}
+
+void setDefaultExpandableSegmentReserveFractionForClass(
+    const std::string& reserve_class,
+    double fraction) {
+  CUDAAllocatorConfig::set_default_reserve_for_class(
+      reserve_class,
+      ExpandableSegmentReserveSpec{/*is_fraction=*/true, fraction});
+}
 } // namespace cuda::CUDACachingAllocator
 } // namespace c10
