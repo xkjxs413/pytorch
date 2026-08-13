@@ -17060,6 +17060,9 @@ def forward(self, arg0_1: "Sym(s77)", arg1_1: "Sym(s27)", arg2_1: "Sym(s53)", ar
             # <func>_cuda not implemented for Half
             check_lowp = False
 
+        if self.device == GPU_TYPE and GPU_TYPE == "mtia" and name == "log_ndtr":
+            check_lowp = False
+
         if (
             is_halide_backend(self.device)
             or is_triton_cpu_backend(self.device)
