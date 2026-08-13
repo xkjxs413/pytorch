@@ -323,6 +323,13 @@ class SIMDKernelFeatures:
             reduction_hint_val = ReductionHint.DEFAULT
         return reduction_hint_val
 
+    def get_grid_split(self) -> int:
+        """The grid split factor, or 0 if this kernel is not split as a grid dim."""
+        for n in self.reduction_nodes():
+            if isinstance(n.node, ir.ComputedBuffer) and n.node._grid_split_factor:
+                return n.node._grid_split_factor
+        return 0
+
     @cache_on_self
     def buffer_read_counts(self) -> dict[str, int]:
         """Counts how many times each buffer is read within the kernel"""
