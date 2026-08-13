@@ -2601,6 +2601,11 @@ class TorchInGraphFunctionVariable(BaseTorchVariable):
                     from_exc=e,
                 )
 
+        for _dev_type, _interface in get_registered_device_interfaces():
+            _cs = getattr(_interface, "current_stream", None)
+            if _cs is not None and _cs not in handlers:
+                handlers[_cs] = handle_current_stream
+
         _synchronize_fn_to_device_type = {
             torch.cuda.synchronize: "cuda",
             torch.xpu.synchronize: "xpu",
