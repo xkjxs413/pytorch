@@ -4096,6 +4096,49 @@ class AOTAutogradCachePicklerTests(torch._dynamo.test_case.TestCase):
         ):
             AOTAutogradCache._pickle_entry(entry, remote=False)
 
+    def test_stabilize_set_deterministic_order(self):
+        """set/frozenset must produce a deterministic sorted list of pickled
+        bytes, so that cache keys are stable across processes regardless of
+        PYTHONHASHSEED."""
+        gm = torch.fx.GraphModule({}, torch.fx.Graph())
+        pickler = AOTAutogradCachePickler(gm)
+
+        dtype_set = {"float32", "bfloat16", "float16", "int8", "uint8"}
+        result = pickler._stabilize_tensor_subclass_metadata(dtype_set)
+        expected = sorted(pickle.dumps(x) for x in dtype_set)
+        self.assertEqual(result, expected)
+
+        # frozenset produces the same result
+        result_fs = pickler._stabilize_tensor_subclass_metadata(
+            frozenset(dtype_set)
+        )
+        self.assertEqual(result, result_fs)
+
+    def test_stabilize_set_in_dict_deterministic(self):
+        """set nested inside metadata returned by __tensor_flatten__
+        must be converted to a sorted list of pickled bytes."""
+        gm = torch.fx.GraphModule({}, torch.fx.Graph())
+        pickler = AOTAutogradCachePickler(gm)
+
+        metadata = {
+            "ragged_idx": 1,
+            "allowed_ops": {"add", "mul", "sub"},
+        }
+        result = pickler._stabilize_tensor_subclass_metadata(metadata)
+        expected_ops = sorted(pickle.dumps(x) for x in metadata["allowed_ops"])
+        self.assertEqual(result["allowed_ops"], expected_ops)
+        self.assertEqual(result["ragged_idx"], 1)
+
+    def test_stabilize_nested_frozenset_in_set(self):
+        """frozenset elements inside a set must be recursively stabilized."""
+        gm = torch.fx.GraphModule({}, torch.fx.Graph())
+        pickler = AOTAutogradCachePickler(gm)
+
+        nested = {frozenset({"a", "b"}), frozenset({"c"})}
+        result = pickler._stabilize_tensor_subclass_metadata(nested)
+        self.assertIsInstance(result, list)
+        self.assertEqual(result, sorted(result))
+
     @skipIfXpu(msg="https://github.com/intel/torch-xpu-ops/issues/4091")
     @requires_gpu_and_triton
     def test_prepare_for_pickle_clears_benchmark_failure_reasons(self):

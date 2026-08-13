@@ -735,6 +735,11 @@ class AOTAutogradCachePickler(FxGraphCachePickler):
             return {
                 k: self._stabilize_tensor_subclass_metadata(v) for k, v in obj.items()
             }
+        if isinstance(obj, (set, frozenset)):
+            return sorted(
+                pickle.dumps(self._stabilize_tensor_subclass_metadata(x))
+                for x in obj
+            )
         return obj
 
     def _default_stable_hash_for_caching(self, tensor: torch.Tensor) -> str:
