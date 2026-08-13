@@ -965,6 +965,29 @@ class TestPatternMatcher(TestCase):
             self.assertGreaterEqual(counters["inductor"]["pattern_matcher_count"], 1)
             counters.clear()
 
+    def test_pointless_cumsum_scalar(self):
+        def fn1():
+            return torch.tensor(5.0).cumsum(0)
+
+        def fn2():
+            return torch.tensor(5).cumsum(0)
+
+        def fn3():
+            return torch.tensor(True).cumsum(0)
+
+        def fn4():
+            return torch.zeros(()).cumsum(0)
+
+        def fn5():
+            return torch.full((), 5.0).cumsum(0)
+
+        def fn6():
+            return torch.tensor(5.0).cumsum(-1)
+
+        for fn in (fn1, fn2, fn3, fn4, fn5, fn6):
+            result = torch.compile(fn, fullgraph=True)()
+            self.assertEqual(result, fn())
+
     def test_reciprocal_sqrt_to_rsqrt(self):
         # reciprocal(sqrt(x)) should fuse into a single rsqrt in the kernel.
         def fn(x):
