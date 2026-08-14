@@ -4735,6 +4735,15 @@ module_db: list[ModuleInfo] = [
                                 "test_forward", dtypes=[torch.bfloat16]),
                    DecorateInfo(toleranceOverride({torch.bfloat16: tol(atol=2e-1, rtol=5e-2)}), "TestModule",
                                 "test_save_load", device_type="cuda", dtypes=[torch.bfloat16]),
+                   # nll_loss2d_forward_xpu reduces across batch blocks via atomicAdd
+                   # into a single bf16 scalar (a faithful port of the CUDA kernel,
+                   # which is documented nondeterministic for sum/mean reductions).
+                   # The bf16 atomic accumulation order varies run to run, so two
+                   # identical forward passes (e.g. the save/load round-trip in
+                   # test_save_load) can differ by ~1e-2; CUDA already carries this
+                   # same override for the identical reason.
+                   DecorateInfo(toleranceOverride({torch.bfloat16: tol(atol=2e-1, rtol=5e-2)}), "TestModule",
+                                "test_save_load", device_type="xpu", dtypes=[torch.bfloat16]),
                ),
                skips=(
                    # The chunked reduction='none' backward recomputes grads
